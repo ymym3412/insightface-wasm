@@ -1,0 +1,245 @@
+<html>
+
+<head>
+  <title>Face Swapper Demo</title>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="https://pyscript.net/latest/pyscript.css" />
+  <script defer src="https://pyscript.net/latest/pyscript.js"></script>
+  <style>
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .repl {
+      width: 640px;
+    }
+    .img {
+      max-width: 640px;
+      height: auto;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>swap-browser</h1>
+    <img class="img" id="image">
+    <input type="file" id="fileInput" />
+    <py-repl class="repl"></py-repl>
+  </div>
+
+  <!---------------------- scripts -------------------------->
+  <py-config type="toml">
+    [[interpreters]]
+    src = "https://cdn.jsdelivr.net/pyodide/v0.23.0/full/pyodide.js"
+    name = "pyodide-0.23.0"
+    lang = "python"
+
+    [[fetch]]
+    files=[
+    "arcface.py",
+    "face_analysis.py",
+    "face.py",
+    "faceswap_front.py",
+    "faceswap.py",
+    "front_model.py",
+    "front.py",
+    "local.py",
+    "retina_face.py",
+    "swapper.py",
+    "utils.py",
+    "models/det_10g.onnx",
+    "models/inswapper_128.onnx",
+    "models/w600k_r50.onnx",
+    "emap.pkl",
+    "images/out.jpg",
+    ]
+
+  </py-config>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.js"></script>
+  <script src="opencv.js"></script>
+  <script>
+    // let session;
+    let session_retina;
+    let session_arcface;
+    let session_swapper;
+    const modelInputShape = [1, 3, 480, 640];
+
+    async function js_init_session(model_path) {
+      console.log('initializing session on onnxruntime-web...')
+      console.log("warming up onnx session")
+      try {
+        var in_tensor = {};
+        console.log(model_path)
+        if (model_path == 'models/det_10g.onnx') {
+          // session作成
+          session_retina = await ort.InferenceSession.create(model_path, {
+            executionProviders: ["wasm"],
+            // executionProviders: ["webgl"],  // not works. Error: unrecognized input '' for node: /model.10/Resize
+          });
+
+          const modelInputShape = [1, 3, 640, 640];
+          const tensor = new ort.Tensor(
+            "float32",
+            new Float32Array(modelInputShape.reduce((a, b) => a * b)),
+            modelInputShape
+          );
+          in_tensor = {"input.1": tensor};
+
+          outputs = await session_retina.run(in_tensor);
+          return session_retina;
+
+        }else if (model_path == 'models/w600k_r50.onnx') {
+          // session作成
+          session_arcface = await ort.InferenceSession.create(model_path, {
+            executionProviders: ["wasm"],
+            // executionProviders: ["webgl"],  // not works. Error: unrecognized input '' for node: /model.10/Resize
+          });
+
+          const modelInputShape = [1, 3, 112, 112];
+          const tensor = new ort.Tensor(
+            "float32",
+            new Float32Array(modelInputShape.reduce((a, b) => a * b)),
+            modelInputShape
+          );
+          in_tensor = { "input.1": tensor };
+
+          outputs = await session_arcface.run(in_tensor);
+          return session_arcface;
+
+        }else if (model_path == 'models/inswapper_128.onnx') {
+          // session作成
+          session_swapper = await ort.InferenceSession.create(model_path, {
+            executionProviders: ["wasm"],
+            // executionProviders: ["webgl"],  // not works. Error: unrecognized input '' for node: /model.10/Resize
+          });
+
+          const targetShape = [1, 3, 128, 128];
+          const sourceShape = [1, 512];
+          const targetTensor = new ort.Tensor(
+            "float32",
+            new Float32Array(targetShape.reduce((a, b) => a * b)),
+            targetShape
+          );
+          const sourceTensor = new ort.Tensor(
+            "float32",
+            new Float32Array(sourceShape.reduce((a, b) => a * b)),
+            sourceShape
+          );
+          in_tensor = { "target": targetTensor, "source": sourceTensor };
+          outputs = await session_swapper.run(in_tensor);
+          return session_swapper;
+
+        }
+      } catch (e) { console.log(e) }
+      return null
+    }
+
+    let input_tensor;
+    let outputs;
+    async function js_run_retina_session(_input_tensor) {
+      console.log('running retina session on onnxruntime-web...')
+      let _outputs = null;
+      const retinaShape = [1, 3, 640, 640];
+      try {
+        input_tensor = _input_tensor
+        const tensor = new ort.Tensor("float32",
+          cv.matFromArray(640, 640, cv.CV_32FC3,
+            new Float32Array(_input_tensor.flat(Infinity).map(a => Array.from(a)).flat())
+          ).data32F, retinaShape)
+        _outputs = await session_retina.run({  "input.1": tensor });
+      } catch (e) { console.error(e) }
+      outputs = _outputs
+      // console.log(outputs)
+      // const dims = _outputs['output0'].dims
+      const dimDict = {};
+      for (const [key, value] of Object.entries(_outputs)) {
+        dimDict[key] = _outputs[key].dims;
+      }
+      const newDict = {};
+      for (const [key, value] of Object.entries(_outputs)) {
+        newDict[key] = new Float32Array(value.data);
+      }
+      newDict['dims'] = dimDict
+      return newDict
+    }
+
+    async function js_run_arcface_session(_input_tensor) {
+      console.log('running arcface session on onnxruntime-web...')
+      let _outputs = null;
+      const arcfaceShape = [1, 3, 112, 112];
+      try {
+        input_tensor = _input_tensor
+        const tensor = new ort.Tensor("float32",
+          cv.matFromArray(112, 112, cv.CV_32FC3,
+            new Float32Array(_input_tensor.flat(Infinity).map(a => Array.from(a)).flat())
+          ).data32F, arcfaceShape)
+        _outputs = await session_arcface.run({ "input.1": tensor });
+      } catch (e) { console.error(e) }
+      outputs = _outputs
+      const dims = _outputs['683'].dims
+      const newDict = {};
+      for (const [key, value] of Object.entries(_outputs)) {
+        newDict[key] = new Float32Array(value.data);
+      }
+      newDict['dims'] = dims
+      return newDict
+    }
+
+    async function js_run_swap_session(_target_tensor, _source_tensor) {
+      console.log('running swapper session on onnxruntime-web...')
+      let _outputs = null;
+      const targetShape = [1, 3, 128, 128];
+      const sourceShape = [1, 512];
+      try {
+        target_tensor = _target_tensor
+        source_tensor = _source_tensor
+        const target = new ort.Tensor("float32",
+          cv.matFromArray(128, 128, cv.CV_32FC3,
+            new Float32Array(target_tensor.flat(Infinity).map(a => Array.from(a)).flat())
+          ).data32F, targetShape)
+
+        const source = new ort.Tensor("float32",
+          cv.matFromArray(1, 512, cv.CV_32FC1,
+          // new Float32Array(source_tensor.flat(Infinity).map(a => Array.from(a)).flat())
+          new Float32Array(source_tensor.flat(Infinity).map(a => Array.from(a)).flat())
+        ).data32F, sourceShape)
+
+        _outputs = await session_swapper.run({ "target": target, "source": source });
+      } catch (e) { console.error(e) }
+      outputs = _outputs
+      const dims = _outputs['output'].dims
+      const newDict = {};
+      for (const [key, value] of Object.entries(_outputs)) {
+        newDict[key] = new Float32Array(value.data);
+      }
+      newDict['dims'] = dims
+      return newDict
+    }
+
+    function readFileAsDataURL() {
+      const inputElement = document.getElementById('fileInput')
+      return new Promise((resolve, reject) => {
+        const file = inputElement.files[0];
+        if (file && file.type.match('image.*')) {
+          const reader = new FileReader();
+          reader.onload = (event) => { resolve(event.target.result); };
+          reader.onerror = (error) => { reject(error); };
+          reader.readAsDataURL(file);
+        } else { reject('Invalid file type or no file selected.'); }
+      });
+    }
+
+  </script>
+
+  <py-script output="image">
+    from front import main
+    import asyncio
+    asyncio.ensure_future(main())
+  </py-script>
+</body>
+
+</html>
